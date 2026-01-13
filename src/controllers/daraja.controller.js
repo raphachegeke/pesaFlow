@@ -1,6 +1,11 @@
+// src/controllers/daraja.controller.js
 import { stkPush } from '../config/daraja.js';
 import Transaction from '../models/Transaction.js';
+import User from '../models/User.js';
 
+/**
+ * Initiate STK Push to top up wallet
+ */
 export const stkPushController = async (req, res) => {
   try {
     const { amount, phone } = req.body;
@@ -8,17 +13,17 @@ export const stkPushController = async (req, res) => {
 
     const accountRef = req.user._id.toString();
 
-    // Save transaction as PENDING first
+    // Call Daraja first
+    const stkResponse = await stkPush(phone, amount, accountRef);
+
+    // Save transaction as PENDING with Daraja CheckoutRequestID
     const transaction = await Transaction.create({
       type: 'DEPOSIT',
       toUser: req.user._id,
       amount,
       status: 'PENDING',
-      reference: `PesaFlow_${Date.now()}`
+      reference: stkResponse.CheckoutRequestID
     });
-
-    // Call Daraja
-    const stkResponse = await stkPush(phone, amount, accountRef);
 
     res.json({ message: 'STK Push initiated', stkResponse });
   } catch (err) {
@@ -27,15 +32,17 @@ export const stkPushController = async (req, res) => {
   }
 };
 
-// Daraja callback
+/**
+ * Handle Daraja STK Push callback
+ */
 export const darajaCallback = async (req, res) => {
   try {
     const body = req.body.Body.stkCallback;
     const resultCode = body.ResultCode;
-
     const checkoutRequestID = body.CheckoutRequestID;
-    const transaction = await Transaction.findOne({ reference: checkoutRequestID });
 
+    // Find transaction by Daraja CheckoutRequestID
+    const transaction = await Transaction.findOne({ reference: checkoutRequestID });
     if (!transaction) return res.status(404).json({ message: 'Transaction not found' });
 
     if (resultCode === 0) {
@@ -45,12 +52,12 @@ export const darajaCallback = async (req, res) => {
       transaction.status = 'SUCCESS';
       await transaction.save();
 
-      // Update user balance
-      const user = transaction.toUser;
-      await (await import('../models/User.js')).default.findByIdAndUpdate(user, { $inc: { balance: amount } });
+      // Update user wallet balance
+      await User.findByIdAndUpdate(transaction.toUser, { $inc: { balance: amount } });
 
       res.json({ message: 'Wallet balance updated' });
     } else {
+      // Payment failed
       transaction.status = 'FAILED';
       await transaction.save();
       res.json({ message: 'Payment failed' });
